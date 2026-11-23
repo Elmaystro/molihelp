@@ -1,0 +1,75 @@
+name: Ad Library scraper
+
+on:
+  workflow_dispatch:                 # manual "Run workflow" button
+    inputs:
+      query:
+        description: "Keyword(s) to search"
+        default: "58 wilaya gros"
+      country:
+        description: "Country code"
+        default: "DZ"
+      max_ads:
+        description: "Max ads to collect"
+        default: "5"
+  # Enable later for the daily run:
+  # schedule:
+  #   - cron: "0 6 * * *"            # every day at 06:00 UTC
+
+permissions:
+  contents: write                    # lets the job commit the data back to the repo
+
+concurrency:
+  group: fb-ad-scraper
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QUERY: ${{ inputs.query || '58 wilaya gros' }}
+      COUNTRY: ${{ inputs.country || 'DZ' }}
+      MAX_ADS: ${{ inputs.max_ads || '5' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run scraper
+        run: |
+          python scripts/fb_ad_scraper.py --query "$QUERY" --country "$COUNTRY" --max-ads "$MAX_ADS" --out ads_out
+
+      - name: Prepare data files
+        run: |
+          set -e
+          mkdir -p data/fb_ads/history
+          TS=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+          cp ads_out/all_ads.csv  data/fb_ads/latest.csv
+          cp ads_out/all_ads.json data/fb_ads/latest.json
+          cp ads_out/all_ads.json "data/fb_ads/history/$TS.json"
+
+      - name: Commit data to the repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/fb_ads
+          git diff --cached --quiet || git commit -m "FB ad data $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase
+          git push
+
+      - name: Upload media + debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ads-${{ github.run_id }}
+          path: ads_out/
+          retention-days: 14
+          if-no-files-found: ignore
