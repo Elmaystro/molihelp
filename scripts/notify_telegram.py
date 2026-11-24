@@ -53,7 +53,8 @@ _load_env_file()
 # Config
 # ---------------------------------------------------------------------------
 BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID       = os.environ.get("TELEGRAM_CHAT_ID", "")
+CHANNEL_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")      # channel (header goes here)
+GROUP_ID      = os.environ.get("TELEGRAM_GROUP_ID", "")     # linked discussion group (ads go here)
 API           = f"https://api.telegram.org/bot{BOT_TOKEN}"
 ADS_DIR       = Path(os.environ.get("ADS_DIR", "ads_out"))
 FILE_IDS_PATH = ADS_DIR / "telegram_file_ids.json"
@@ -87,9 +88,9 @@ def tg(method, **kwargs):
     raise RuntimeError(f"Failed {method} after 3 attempts")
 
 
-def send_text(text, reply_to=None):
+def send_text(text, chat_id=None, reply_to=None):
     payload = {
-        "chat_id": CHAT_ID,
+        "chat_id": chat_id or GROUP_ID,
         "text": text[:MESSAGE_LIMIT],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -100,7 +101,7 @@ def send_text(text, reply_to=None):
 
 
 def send_photo(photo_path, caption, reply_to=None):
-    data = {"chat_id": CHAT_ID, "caption": caption[:CAPTION_LIMIT], "parse_mode": "HTML"}
+    data = {"chat_id": GROUP_ID, "caption": caption[:CAPTION_LIMIT], "parse_mode": "HTML"}
     if reply_to:
         data["reply_to_message_id"] = reply_to
     with open(photo_path, "rb") as f:
@@ -108,11 +109,38 @@ def send_photo(photo_path, caption, reply_to=None):
 
 
 def send_video(video_path, caption, reply_to=None):
-    data = {"chat_id": CHAT_ID, "caption": caption[:CAPTION_LIMIT], "parse_mode": "HTML"}
+    data = {"chat_id": GROUP_ID, "caption": caption[:CAPTION_LIMIT], "parse_mode": "HTML"}
     if reply_to:
         data["reply_to_message_id"] = reply_to
     with open(video_path, "rb") as f:
         return tg("sendVideo", data=data, files={"video": f})
+
+
+def find_forwarded_msg(channel_msg_id, timeout=15):
+    """
+    After posting to the channel, Telegram auto-forwards it to the discussion group.
+    Poll getUpdates to find that forwarded message so we can reply to it.
+    """
+    deadline = time.time() + timeout
+    offset = None
+    while time.time() < deadline:
+        params = {"timeout": 3, "allowed_updates": ["message"]}
+        if offset:
+            params["offset"] = offset
+        updates = tg("getUpdates", json=params)
+        for u in updates:
+            offset = u["update_id"] + 1
+            msg = u.get("message", {})
+            if str(msg.get("chat", {}).get("id")) != str(GROUP_ID):
+                continue
+            # Telegram sets forward_from_message_id OR forward_origin.message_id
+            fwd_id = msg.get("forward_from_message_id")
+            if not fwd_id:
+                fwd_id = (msg.get("forward_origin") or {}).get("message_id")
+            if fwd_id == channel_msg_id:
+                return msg["message_id"]
+        time.sleep(1)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +272,9 @@ def save_file_ids(fids):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    if not BOT_TOKEN: sys.exit("TELEGRAM_BOT_TOKEN is not set.")
-    if not CHAT_ID:   sys.exit("TELEGRAM_CHAT_ID is not set.")
+    if not BOT_TOKEN:  sys.exit("TELEGRAM_BOT_TOKEN is not set.")
+    if not CHANNEL_ID: sys.exit("TELEGRAM_CHAT_ID is not set.")
+    if not GROUP_ID:   sys.exit("TELEGRAM_GROUP_ID is not set.")
 
     ads_file = ADS_DIR / "all_ads.json"
     if not ads_file.exists():
@@ -260,21 +289,30 @@ def main():
     now      = datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M UTC")
     active   = sum(1 for a in ads if a.get("status") == "active")
 
-    # ── 1. Post the header ──────────────────────────────────────────────────
+    # ── 1. Post header to CHANNEL ────────────────────────────────────────────
     header_text = (
         f"<b>🔍 New Scrape — {now}</b>\n\n"
         f"🔎 Query: <code>{_esc(query or 'N/A')}</code>\n"
         f"📦 Total: <b>{len(ads)}</b>  •  "
         f"✅ Active: <b>{active}</b>  •  "
         f"⏸ Inactive: <b>{len(ads) - active}</b>\n\n"
-        f"👇 Tap <b>replies</b> below to see all individual ads."
+        f"💬 Tap <b>Leave a comment</b> to see all individual ads."
     )
-    header_msg = send_text(header_text)
-    header_id  = header_msg["message_id"]
-    print(f"✅ Header posted  (id={header_id})")
+    channel_msg = send_text(header_text, chat_id=CHANNEL_ID)
+    channel_msg_id = channel_msg["message_id"]
+    print(f"✅ Header posted to channel (id={channel_msg_id})")
+
+    # ── 2. Find the auto-forwarded message in the discussion group ───────────
+    print("⏳ Waiting for auto-forward to discussion group…")
+    group_msg_id = find_forwarded_msg(channel_msg_id, timeout=20)
+    if not group_msg_id:
+        # Fallback: post directly to group without threading
+        print("⚠️  Auto-forward not found — posting ads directly to group")
+    else:
+        print(f"✅ Found forwarded msg in group (id={group_msg_id})")
     time.sleep(1)
 
-    # ── 2. Reply each ad under the header ───────────────────────────────────
+    # ── 3. Post each ad to DISCUSSION GROUP as a reply ───────────────────────
     sent = failed = 0
     for i, ad in enumerate(ads, 1):
         lib_id = ad.get("library_id", "?")
@@ -284,14 +322,14 @@ def main():
             if media_path:
                 caption = format_caption(ad)
                 if media_type == "video":
-                    msg = send_video(media_path, caption, reply_to=header_id)
+                    msg = send_video(media_path, caption, reply_to=group_msg_id)
                 else:
-                    msg = send_photo(media_path, caption, reply_to=header_id)
+                    msg = send_photo(media_path, caption, reply_to=group_msg_id)
                 fid = extract_file_id(msg, media_type)
                 if fid:
                     file_ids[lib_id] = fid
             else:
-                send_text(format_text_message(ad), reply_to=header_id)
+                send_text(format_text_message(ad), reply_to=group_msg_id)
 
             sent += 1
             print(f"  [{i}/{len(ads)}] ✓ {lib_id}")
@@ -301,9 +339,9 @@ def main():
 
         time.sleep(3.0 if media_path else 2.0)
 
-    # ── 3. Save & close ─────────────────────────────────────────────────────
+    # ── 4. Save & close ──────────────────────────────────────────────────────
     save_file_ids(file_ids)
-    send_text(f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>", reply_to=header_id)
+    send_text(f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>", reply_to=group_msg_id)
 
     print(f"\n{'='*50}")
     print(f"Done. {sent} sent, {failed} failed.")
