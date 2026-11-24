@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Post scraped ads to a Telegram forum topic (thread).
+Post scraped ads to a Telegram Channel as commentable posts.
 Runs inside GitHub Actions AFTER fb_ad_scraper.py finishes.
 
-Each run creates a new topic in a supergroup (Topics must be enabled).
-Every ad is posted with its media (uploaded to Telegram), and the
-returned file_id is saved to telegram_file_ids.json so the media can
-be re-sent instantly later without re-uploading.
+Flow:
+  1. Posts a summary message to the channel
+  2. Posts each ad as an individual channel post (with media if available)
+  3. Each post automatically has a "Comments" button (via linked discussion group)
+  4. file_ids are saved so media can be re-sent instantly later
 
 Required env vars
     TELEGRAM_BOT_TOKEN
-    TELEGRAM_CHAT_ID       supergroup ID (negative number, e.g. -100...)
+    TELEGRAM_CHAT_ID       Channel ID (negative number, e.g. -100...)
+                           The bot must be admin in the channel.
 
 Optional env vars
-    AD_QUERY               shown in the topic title
+    AD_QUERY               shown in the summary post
     ADS_DIR                path to the scraper output  (default: ads_out)
 """
 
@@ -88,44 +90,34 @@ def tg(method, **kwargs):
     raise RuntimeError(f"Failed {method} after 3 attempts")
 
 
-def create_topic(title):
-    """Create a forum topic and return its message_thread_id."""
-    return tg("createForumTopic", json={
-        "chat_id": CHAT_ID,
-        "name": title[:128],
-    })["message_thread_id"]
-
-
-def send_text(thread_id, text):
+def send_text(text):
+    """Post a plain text message to the channel."""
     return tg("sendMessage", json={
         "chat_id": CHAT_ID,
-        "message_thread_id": thread_id,
         "text": text[:MESSAGE_LIMIT],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     })
 
 
-def send_photo(thread_id, photo_path, caption):
-    """Upload a photo file. Returns the Message object."""
+def send_photo(photo_path, caption):
+    """Upload a photo to the channel. Returns the Message object."""
     with open(photo_path, "rb") as f:
         return tg("sendPhoto",
                   data={
                       "chat_id": CHAT_ID,
-                      "message_thread_id": thread_id,
                       "caption": caption[:CAPTION_LIMIT],
                       "parse_mode": "HTML",
                   },
                   files={"photo": f})
 
 
-def send_video(thread_id, video_path, caption):
-    """Upload a video file. Returns the Message object."""
+def send_video(video_path, caption):
+    """Upload a video to the channel. Returns the Message object."""
     with open(video_path, "rb") as f:
         return tg("sendVideo",
                   data={
                       "chat_id": CHAT_ID,
-                      "message_thread_id": thread_id,
                       "caption": caption[:CAPTION_LIMIT],
                       "parse_mode": "HTML",
                   },
@@ -296,28 +288,19 @@ def main():
     query = os.environ.get("AD_QUERY", "")
     now = datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M UTC")
 
-    # ---- Create forum topic ----
+    # ---- Summary post ----
     active = sum(1 for a in ads if a.get("status") == "active")
-    title = f"🔍 {now} • {len(ads)} ads"
-    if query:
-        title += f' • "{query[:40]}"'
-
-    thread_id = create_topic(title)
-    print(f"✅ Created topic: {title}  (thread_id={thread_id})")
-
-    # ---- Summary message ----
     summary = (
-        f"<b>📋 Scrape Summary</b>\n\n"
+        f"<b>🔍 New Ad Scrape — {now}</b>\n\n"
         f"🔎 Query: <code>{_esc(query or 'N/A')}</code>\n"
-        f"📊 Total ads: <b>{len(ads)}</b>\n"
-        f"✅ Active: <b>{active}</b>\n"
-        f"⏸ Inactive: <b>{len(ads) - active}</b>\n"
-        f"🕐 Scraped at: {now}"
+        f"📊 Total ads: <b>{len(ads)}</b>  •  ✅ Active: <b>{active}</b>  •  ⏸ Inactive: <b>{len(ads) - active}</b>\n\n"
+        f"Each ad below is a separate post — tap <b>💬 Comments</b> to discuss."
     )
-    send_text(thread_id, summary)
-    time.sleep(0.5)
+    send_text(summary)
+    print(f"✅ Posted summary to channel")
+    time.sleep(1)
 
-    # ---- Post each ad ----
+    # ---- Post each ad as an individual channel post ----
     sent = 0
     failed = 0
     for i, ad in enumerate(ads, 1):
@@ -328,16 +311,16 @@ def main():
             if media_path:
                 caption = format_caption(ad)
                 if media_type == "video":
-                    msg = send_video(thread_id, media_path, caption)
+                    msg = send_video(media_path, caption)
                 else:
-                    msg = send_photo(thread_id, media_path, caption)
+                    msg = send_photo(media_path, caption)
                 # Store the file_id
                 fid = extract_file_id(msg, media_type)
                 if fid:
                     file_ids[lib_id] = fid
             else:
-                # No local media — send as text
-                send_text(thread_id, format_text_message(ad))
+                # No local media — send as text post
+                send_text(format_text_message(ad))
 
             sent += 1
             print(f"  [{i}/{len(ads)}] ✓ {lib_id}")
@@ -345,17 +328,17 @@ def main():
             failed += 1
             print(f"  [{i}/{len(ads)}] ✗ {lib_id}: {e}")
 
-        # Respect Telegram rate limits (~20 msg/min to groups)
-        time.sleep(3.0 if media_path else 1.5)
+        # Respect Telegram rate limits (channels: ~20 posts/min)
+        time.sleep(3.0 if media_path else 2.0)
 
     # ---- Save file_ids ----
     save_file_ids(file_ids)
 
-    # ---- Final summary in thread ----
-    send_text(thread_id, f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>")
+    # ---- Final post ----
+    send_text(f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>")
 
     print(f"\n{'='*50}")
-    print(f"Done. {sent} ads sent, {failed} failed.")
+    print(f"Done. {sent} ads sent to channel, {failed} failed.")
     print(f"file_ids saved to {FILE_IDS_PATH}")
 
 
