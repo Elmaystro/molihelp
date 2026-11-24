@@ -62,8 +62,10 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "ad-scraper.yml")
-DEFAULT_QUERY = os.environ.get("DEFAULT_QUERY", "")
-DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "ALL")
+DEFAULT_QUERY = os.environ.get("DEFAULT_QUERY", "58 wilaya gros")
+DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "DZ")
+DEFAULT_STATUS = os.environ.get("DEFAULT_STATUS", "active")
+DEFAULT_MAX_ADS = os.environ.get("DEFAULT_MAX_ADS", "10")
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -101,7 +103,7 @@ def reply(chat_id, text, reply_to=None):
 # ---------------------------------------------------------------------------
 # GitHub Actions trigger
 # ---------------------------------------------------------------------------
-def trigger_workflow(query, country="ALL", status="active"):
+def trigger_workflow(query, country="DZ", status="active", max_ads="10"):
     """Fire a workflow_dispatch event. Returns True on success."""
     url = (
         f"https://api.github.com/repos/{GITHUB_REPO}"
@@ -112,9 +114,10 @@ def trigger_workflow(query, country="ALL", status="active"):
         json={
             "ref": "main",
             "inputs": {
-                "query": query,
-                "country": country,
-                "status": status,
+                "query": str(query),
+                "country": str(country),
+                "status": str(status),
+                "max_ads": str(max_ads),
             },
         },
         headers={
@@ -136,23 +139,25 @@ def handle_new(chat_id, text, msg_id):
     """Parse /new arguments, trigger workflow, reply."""
     raw = text.replace("/new", "", 1).strip()
 
-    # Support  /new query=shoes country=US status=active
+    # Support /new query=shoes country=DZ status=active max_ads=10
     kv = dict(re.findall(r"(\w+)\s*=\s*(\S+)", raw))
     if kv:
         query = kv.get("query", DEFAULT_QUERY)
         country = kv.get("country", DEFAULT_COUNTRY)
-        status = kv.get("status", "active")
+        status = kv.get("status", DEFAULT_STATUS)
+        max_ads = kv.get("max_ads", DEFAULT_MAX_ADS)
     else:
-        # Simple form:  /new running shoes
+        # Simple form: /new 58 wilaya gros
         query = raw or DEFAULT_QUERY
         country = DEFAULT_COUNTRY
-        status = "active"
+        status = DEFAULT_STATUS
+        max_ads = DEFAULT_MAX_ADS
 
     if not query:
         reply(chat_id,
               "Usage:\n"
               "<code>/new your search query</code>\n"
-              "<code>/new query=shoes country=US status=active</code>",
+              "<code>/new query=shoes country=DZ max_ads=10</code>",
               msg_id)
         return
 
@@ -160,18 +165,19 @@ def handle_new(chat_id, text, msg_id):
           f"⏳ <b>Launching scrape…</b>\n\n"
           f"🔎 Query: <code>{query}</code>\n"
           f"🌍 Country: <code>{country}</code>\n"
-          f"📊 Status: <code>{status}</code>\n\n"
+          f"📊 Status: <code>{status}</code>\n"
+          f"📦 Max ads: <code>{max_ads}</code>\n\n"
           f"Triggering GitHub Actions…",
           msg_id)
 
     try:
-        trigger_workflow(query, country, status)
+        trigger_workflow(query, country, status, max_ads)
         reply(chat_id,
               "✅ <b>Workflow started!</b>\n\n"
-              "Scraping usually takes 10–30 min.\n"
+              "Scraping usually takes a few minutes.\n"
               "A new thread will appear in this chat when it's done.",
               msg_id)
-        log.info("Workflow triggered: query=%r country=%s", query, country)
+        log.info("Workflow triggered: query=%r country=%s status=%s max_ads=%s", query, country, status, max_ads)
     except Exception as e:
         reply(chat_id, f"❌ Failed to trigger workflow:\n<code>{e}</code>", msg_id)
         log.error("Workflow trigger failed: %s", e)
@@ -181,14 +187,18 @@ def handle_help(chat_id, msg_id):
     reply(chat_id,
           "<b>🤖 MoliHelp Ad Scraper</b>\n\n"
           "<b>Commands:</b>\n"
-          "/new <code>query</code> — Scrape ads for a keyword\n"
-          "/new <code>query=shoes country=US</code> — With options\n"
+          "/new <code>query</code> — Scrape ads in Algeria (DZ)\n"
+          "/new <code>query=shoes country=DZ max_ads=10</code> — Custom options\n"
           "/help — This message\n\n"
+          "<b>Defaults:</b>\n"
+          f"• Country: <code>{DEFAULT_COUNTRY}</code>\n"
+          f"• Status: <code>{DEFAULT_STATUS}</code>\n"
+          f"• Max ads: <code>{DEFAULT_MAX_ADS}</code>\n\n"
           "<b>How it works:</b>\n"
-          "1. <code>/new</code> triggers a GitHub Actions workflow\n"
+          "1. <code>/new</code> triggers GitHub Actions\n"
           "2. The scraper collects ads from Meta Ad Library\n"
           "3. A new thread appears here with every ad + media\n"
-          "4. Media is stored in Telegram — it never expires",
+          "4. Media is stored in Telegram — never expires",
           msg_id)
 
 

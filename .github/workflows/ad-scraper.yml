@@ -9,9 +9,12 @@ on:
       country:
         description: "Country code"
         default: "DZ"
+      status:
+        description: "active / inactive / all"
+        default: "active"
       max_ads:
         description: "Max ads to collect"
-        default: "5"
+        default: "10"
   # Enable later for the daily run:
   # schedule:
   #   - cron: "0 6 * * *"            # every day at 06:00 UTC
@@ -30,7 +33,8 @@ jobs:
     env:
       QUERY: ${{ inputs.query || '58 wilaya gros' }}
       COUNTRY: ${{ inputs.country || 'DZ' }}
-      MAX_ADS: ${{ inputs.max_ads || '5' }}
+      STATUS: ${{ inputs.status || 'active' }}
+      MAX_ADS: ${{ inputs.max_ads || '10' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +49,7 @@ jobs:
 
       - name: Run scraper
         run: |
-          python scripts/fb_ad_scraper.py --query "$QUERY" --country "$COUNTRY" --max-ads "$MAX_ADS" --out ads_out
+          python scripts/fb_ad_scraper.py --query "$QUERY" --country "$COUNTRY" --status "$STATUS" --max-ads "$MAX_ADS" --out ads_out
 
       - name: Prepare data files
         run: |
