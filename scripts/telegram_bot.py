@@ -215,12 +215,15 @@ def poll():
             updates = tg("getUpdates", json={
                 "offset": offset,
                 "timeout": 30,
-                "allowed_updates": ["message"],
+                # Listen to both regular messages (groups) AND channel posts
+                "allowed_updates": ["message", "channel_post"],
             })
 
             for u in updates:
                 offset = u["update_id"] + 1
-                msg = u.get("message")
+
+                # Support both group messages and channel posts
+                msg = u.get("message") or u.get("channel_post")
                 if not msg or not msg.get("text"):
                     continue
 
@@ -228,7 +231,7 @@ def poll():
                 msg_id = msg["message_id"]
                 text = msg["text"].strip()
 
-                # Strip @botname suffix from commands in groups
+                # Strip @botname suffix from commands
                 cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
 
                 if cmd == "/new":

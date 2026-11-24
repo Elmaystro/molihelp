@@ -90,38 +90,43 @@ def tg(method, **kwargs):
     raise RuntimeError(f"Failed {method} after 3 attempts")
 
 
-def send_text(text):
-    """Post a plain text message to the channel."""
-    return tg("sendMessage", json={
+def send_text(text, reply_to=None):
+    """Post a text message to the channel, optionally as a reply."""
+    payload = {
         "chat_id": CHAT_ID,
         "text": text[:MESSAGE_LIMIT],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-    })
+    }
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+    return tg("sendMessage", json=payload)
 
 
-def send_photo(photo_path, caption):
+def send_photo(photo_path, caption, reply_to=None):
     """Upload a photo to the channel. Returns the Message object."""
+    data = {
+        "chat_id": CHAT_ID,
+        "caption": caption[:CAPTION_LIMIT],
+        "parse_mode": "HTML",
+    }
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
     with open(photo_path, "rb") as f:
-        return tg("sendPhoto",
-                  data={
-                      "chat_id": CHAT_ID,
-                      "caption": caption[:CAPTION_LIMIT],
-                      "parse_mode": "HTML",
-                  },
-                  files={"photo": f})
+        return tg("sendPhoto", data=data, files={"photo": f})
 
 
-def send_video(video_path, caption):
+def send_video(video_path, caption, reply_to=None):
     """Upload a video to the channel. Returns the Message object."""
+    data = {
+        "chat_id": CHAT_ID,
+        "caption": caption[:CAPTION_LIMIT],
+        "parse_mode": "HTML",
+    }
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
     with open(video_path, "rb") as f:
-        return tg("sendVideo",
-                  data={
-                      "chat_id": CHAT_ID,
-                      "caption": caption[:CAPTION_LIMIT],
-                      "parse_mode": "HTML",
-                  },
-                  files={"video": f})
+        return tg("sendVideo", data=data, files={"video": f})
 
 
 # ---------------------------------------------------------------------------
@@ -288,19 +293,20 @@ def main():
     query = os.environ.get("AD_QUERY", "")
     now = datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M UTC")
 
-    # ---- Summary post ----
+    # ---- Summary post (the "broadcast") ----
     active = sum(1 for a in ads if a.get("status") == "active")
     summary = (
-        f"<b>🔍 New Ad Scrape — {now}</b>\n\n"
+        f"<b>🔍 New Scrape — {now}</b>\n\n"
         f"🔎 Query: <code>{_esc(query or 'N/A')}</code>\n"
-        f"📊 Total ads: <b>{len(ads)}</b>  •  ✅ Active: <b>{active}</b>  •  ⏸ Inactive: <b>{len(ads) - active}</b>\n\n"
-        f"Each ad below is a separate post — tap <b>💬 Comments</b> to discuss."
+        f"📊 Total: <b>{len(ads)}</b>  •  ✅ Active: <b>{active}</b>  •  ⏸ Inactive: <b>{len(ads) - active}</b>\n\n"
+        f"👇 All ads are posted below as replies to this message."
     )
-    send_text(summary)
-    print(f"✅ Posted summary to channel")
+    header_msg = send_text(summary)
+    header_id = header_msg["message_id"]
+    print(f"✅ Posted header (message_id={header_id})")
     time.sleep(1)
 
-    # ---- Post each ad as an individual channel post ----
+    # ---- Post each ad as a reply to the header ----
     sent = 0
     failed = 0
     for i, ad in enumerate(ads, 1):
@@ -311,16 +317,14 @@ def main():
             if media_path:
                 caption = format_caption(ad)
                 if media_type == "video":
-                    msg = send_video(media_path, caption)
+                    msg = send_video(media_path, caption, reply_to=header_id)
                 else:
-                    msg = send_photo(media_path, caption)
-                # Store the file_id
+                    msg = send_photo(media_path, caption, reply_to=header_id)
                 fid = extract_file_id(msg, media_type)
                 if fid:
                     file_ids[lib_id] = fid
             else:
-                # No local media — send as text post
-                send_text(format_text_message(ad))
+                send_text(format_text_message(ad), reply_to=header_id)
 
             sent += 1
             print(f"  [{i}/{len(ads)}] ✓ {lib_id}")
@@ -328,14 +332,13 @@ def main():
             failed += 1
             print(f"  [{i}/{len(ads)}] ✗ {lib_id}: {e}")
 
-        # Respect Telegram rate limits (channels: ~20 posts/min)
         time.sleep(3.0 if media_path else 2.0)
 
     # ---- Save file_ids ----
     save_file_ids(file_ids)
 
-    # ---- Final post ----
-    send_text(f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>")
+    # ---- Final reply under the header ----
+    send_text(f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>", reply_to=header_id)
 
     print(f"\n{'='*50}")
     print(f"Done. {sent} ads sent to channel, {failed} failed.")
