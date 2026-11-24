@@ -40,7 +40,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright
+          pip install playwright requests
           playwright install --with-deps chromium
 
       - name: Run scraper
@@ -56,11 +56,19 @@ jobs:
           cp ads_out/all_ads.json data/fb_ads/latest.json
           cp ads_out/all_ads.json "data/fb_ads/history/$TS.json"
 
+      - name: Send ads to Telegram
+        if: always() && hashFiles('ads_out/all_ads.json') != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AD_QUERY: ${{ inputs.query || '58 wilaya gros' }}
+        run: python scripts/notify_telegram.py
+
       - name: Commit data to the repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/fb_ads
+          git add data/fb_ads ads_out/telegram_file_ids.json
           git diff --cached --quiet || git commit -m "FB ad data $(date -u +%Y-%m-%d\ %H:%M) UTC"
           git pull --rebase
           git push
