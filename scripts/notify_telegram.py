@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Post scraped ads to a Telegram Channel as commentable posts.
+Post scraped ads to a Telegram supergroup with threaded replies.
 Runs inside GitHub Actions AFTER fb_ad_scraper.py finishes.
 
 Flow:
-  1. Posts a summary message to the channel
-  2. Posts each ad as an individual channel post (with media if available)
-  3. Each post automatically has a "Comments" button (via linked discussion group)
-  4. file_ids are saved so media can be re-sent instantly later
+  1. Posts one summary/header message to the supergroup
+  2. Posts every ad as a REPLY to that header (reply_to_message_id)
+  3. In Telegram, tap the header to see all ads threaded inside it
 
 Required env vars
     TELEGRAM_BOT_TOKEN
-    TELEGRAM_CHAT_ID       Channel ID (negative number, e.g. -100...)
-                           The bot must be admin in the channel.
+    TELEGRAM_CHAT_ID       Supergroup ID (negative number, e.g. -100...)
+                           The bot must be admin with post message permission.
 
 Optional env vars
-    AD_QUERY               shown in the summary post
+    AD_QUERY               shown in the header message
     ADS_DIR                path to the scraper output  (default: ads_out)
 """
 
@@ -27,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+
 
 # ---------------------------------------------------------------------------
 # Load .env file if present (for local testing)
@@ -42,25 +42,24 @@ def _load_env_file():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip("'\"")
+                k, v = k.strip(), v.strip().strip("'\"")
                 if k and k not in os.environ:
                     os.environ[k] = v
+
 
 _load_env_file()
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-ADS_DIR = Path(os.environ.get("ADS_DIR", "ads_out"))
+BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID       = os.environ.get("TELEGRAM_CHAT_ID", "")
+API           = f"https://api.telegram.org/bot{BOT_TOKEN}"
+ADS_DIR       = Path(os.environ.get("ADS_DIR", "ads_out"))
 FILE_IDS_PATH = ADS_DIR / "telegram_file_ids.json"
 
-# Telegram limits
-CAPTION_LIMIT = 1024
-MESSAGE_LIMIT = 4096
+CAPTION_LIMIT  = 1024
+MESSAGE_LIMIT  = 4096
 UPLOAD_LIMIT_MB = 50
 
 
@@ -68,14 +67,12 @@ UPLOAD_LIMIT_MB = 50
 # Telegram helpers
 # ---------------------------------------------------------------------------
 def tg(method, **kwargs):
-    """Call a Telegram Bot API method and return the result."""
     for attempt in range(3):
         try:
             r = requests.post(f"{API}/{method}", timeout=120, **kwargs)
             data = r.json()
             if data.get("ok"):
                 return data["result"]
-            # Rate-limited — wait and retry
             if r.status_code == 429:
                 retry_after = data.get("parameters", {}).get("retry_after", 5)
                 print(f"  Rate-limited, waiting {retry_after}s…")
@@ -91,7 +88,6 @@ def tg(method, **kwargs):
 
 
 def send_text(text, reply_to=None):
-    """Post a text message to the channel, optionally as a reply."""
     payload = {
         "chat_id": CHAT_ID,
         "text": text[:MESSAGE_LIMIT],
@@ -104,12 +100,7 @@ def send_text(text, reply_to=None):
 
 
 def send_photo(photo_path, caption, reply_to=None):
-    """Upload a photo to the channel. Returns the Message object."""
-    data = {
-        "chat_id": CHAT_ID,
-        "caption": caption[:CAPTION_LIMIT],
-        "parse_mode": "HTML",
-    }
+    data = {"chat_id": CHAT_ID, "caption": caption[:CAPTION_LIMIT], "parse_mode": "HTML"}
     if reply_to:
         data["reply_to_message_id"] = reply_to
     with open(photo_path, "rb") as f:
@@ -117,12 +108,7 @@ def send_photo(photo_path, caption, reply_to=None):
 
 
 def send_video(video_path, caption, reply_to=None):
-    """Upload a video to the channel. Returns the Message object."""
-    data = {
-        "chat_id": CHAT_ID,
-        "caption": caption[:CAPTION_LIMIT],
-        "parse_mode": "HTML",
-    }
+    data = {"chat_id": CHAT_ID, "caption": caption[:CAPTION_LIMIT], "parse_mode": "HTML"}
     if reply_to:
         data["reply_to_message_id"] = reply_to
     with open(video_path, "rb") as f:
@@ -132,15 +118,18 @@ def send_video(video_path, caption, reply_to=None):
 # ---------------------------------------------------------------------------
 # Ad formatting
 # ---------------------------------------------------------------------------
-def format_caption(ad):
-    """Build a compact HTML caption for one ad (must stay under 1024 chars)."""
-    lines = []
+def _esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+
+def format_caption(ad):
+    """Compact caption for a media message (≤1024 chars)."""
+    lines = []
     name = ad.get("advertiser") or "Unknown advertiser"
     lines.append(f"<b>🏷 {_esc(name)}</b>")
 
-    status = (ad.get("status") or "?").capitalize()
-    days = ad.get("days_running")
+    status   = (ad.get("status") or "?").capitalize()
+    days     = ad.get("days_running")
     days_str = f"{days} days" if days is not None else "? days"
     lines.append(f"📊 {status} • {days_str}")
 
@@ -152,13 +141,11 @@ def format_caption(ad):
         lines.append(f"\n📝 {_esc(body)}")
 
     headline = ad.get("headline")
-    cta = ad.get("cta")
+    cta      = ad.get("cta")
     if headline or cta:
         parts = []
-        if headline:
-            parts.append(_esc(headline[:80]))
-        if cta:
-            parts.append(f"CTA: {_esc(cta)}")
+        if headline: parts.append(_esc(headline[:80]))
+        if cta:      parts.append(f"CTA: {_esc(cta)}")
         lines.append(f"🎯 {' | '.join(parts)}")
 
     domain = ad.get("domain")
@@ -171,22 +158,20 @@ def format_caption(ad):
 
     lib_id = ad.get("library_id", "?")
     lines.append(
-        f'\n📚 <a href="https://www.facebook.com/ads/library/?id={lib_id}">View in Ad Library</a>'
-        f"  •  ID: <code>{lib_id}</code>"
+        f'\n📚 <a href="https://www.facebook.com/ads/library/?id={lib_id}">Ad Library</a>'
+        f"  •  <code>{lib_id}</code>"
     )
-
     return "\n".join(lines)
 
 
 def format_text_message(ad):
-    """Longer version for ads without media (up to 4096 chars)."""
+    """Full text post for ads without media (≤4096 chars)."""
     lines = []
-
     name = ad.get("advertiser") or "Unknown advertiser"
     lines.append(f"<b>🏷 {_esc(name)}</b>")
 
-    status = (ad.get("status") or "?").capitalize()
-    days = ad.get("days_running")
+    status   = (ad.get("status") or "?").capitalize()
+    days     = ad.get("days_running")
     days_str = f"{days} days" if days is not None else "? days"
     lines.append(f"📊 {status} • {days_str}")
 
@@ -198,19 +183,15 @@ def format_text_message(ad):
         lines.append(f"\n📝 {_esc(body)}")
 
     headline = ad.get("headline")
-    cta = ad.get("cta")
-    if headline:
-        lines.append(f"🎯 {_esc(headline)}")
-    if cta:
-        lines.append(f"🔘 CTA: {_esc(cta)}")
+    cta      = ad.get("cta")
+    if headline: lines.append(f"🎯 {_esc(headline)}")
+    if cta:      lines.append(f"🔘 CTA: {_esc(cta)}")
 
     domain = ad.get("domain")
-    if domain:
-        lines.append(f"🌐 {_esc(domain)}")
+    if domain: lines.append(f"🌐 {_esc(domain)}")
 
     landings = ad.get("landing_urls") or []
-    if landings:
-        lines.append(f"🔗 {landings[0][:200]}")
+    if landings: lines.append(f"🔗 {landings[0][:200]}")
 
     variants = ad.get("same_creative_count")
     if variants and variants > 1:
@@ -218,40 +199,29 @@ def format_text_message(ad):
 
     lib_id = ad.get("library_id", "?")
     lines.append(
-        f'\n📚 <a href="https://www.facebook.com/ads/library/?id={lib_id}">View in Ad Library</a>'
-        f"  •  ID: <code>{lib_id}</code>"
+        f'\n📚 <a href="https://www.facebook.com/ads/library/?id={lib_id}">Ad Library</a>'
+        f"  •  <code>{lib_id}</code>"
     )
-
     return "\n".join(lines)
-
-
-def _esc(s):
-    """Escape HTML special chars for Telegram."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 # ---------------------------------------------------------------------------
 # Media helpers
 # ---------------------------------------------------------------------------
 def find_local_media(ad):
-    """Return (Path, type) for the first downloaded media file, or (None, None)."""
     for m in ad.get("media", []):
         fname = m.get("file")
         if fname:
             path = ADS_DIR / ad["library_id"] / fname
-            if path.exists():
-                size_mb = path.stat().st_size / (1024 * 1024)
-                if size_mb <= UPLOAD_LIMIT_MB:
-                    return path, m["type"]
+            if path.exists() and path.stat().st_size / (1024 * 1024) <= UPLOAD_LIMIT_MB:
+                return path, m["type"]
     return None, None
 
 
 def extract_file_id(msg, media_type):
-    """Pull the file_id from a Telegram Message object."""
     if media_type == "video" and msg.get("video"):
         return {"type": "video", "file_id": msg["video"]["file_id"]}
     if msg.get("photo"):
-        # photo is an array of sizes; take the largest
         return {"type": "photo", "file_id": msg["photo"][-1]["file_id"]}
     return None
 
@@ -267,19 +237,15 @@ def load_file_ids():
 
 def save_file_ids(fids):
     ADS_DIR.mkdir(parents=True, exist_ok=True)
-    FILE_IDS_PATH.write_text(
-        json.dumps(fids, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    FILE_IDS_PATH.write_text(json.dumps(fids, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    if not BOT_TOKEN:
-        sys.exit("TELEGRAM_BOT_TOKEN is not set.")
-    if not CHAT_ID:
-        sys.exit("TELEGRAM_CHAT_ID is not set.")
+    if not BOT_TOKEN: sys.exit("TELEGRAM_BOT_TOKEN is not set.")
+    if not CHAT_ID:   sys.exit("TELEGRAM_CHAT_ID is not set.")
 
     ads_file = ADS_DIR / "all_ads.json"
     if not ads_file.exists():
@@ -290,25 +256,26 @@ def main():
         sys.exit("all_ads.json is empty — nothing to send.")
 
     file_ids = load_file_ids()
-    query = os.environ.get("AD_QUERY", "")
-    now = datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M UTC")
+    query    = os.environ.get("AD_QUERY", "")
+    now      = datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M UTC")
+    active   = sum(1 for a in ads if a.get("status") == "active")
 
-    # ---- Summary post (the "broadcast") ----
-    active = sum(1 for a in ads if a.get("status") == "active")
-    summary = (
+    # ── 1. Post the header ──────────────────────────────────────────────────
+    header_text = (
         f"<b>🔍 New Scrape — {now}</b>\n\n"
         f"🔎 Query: <code>{_esc(query or 'N/A')}</code>\n"
-        f"📊 Total: <b>{len(ads)}</b>  •  ✅ Active: <b>{active}</b>  •  ⏸ Inactive: <b>{len(ads) - active}</b>\n\n"
-        f"👇 All ads are posted below as replies to this message."
+        f"📦 Total: <b>{len(ads)}</b>  •  "
+        f"✅ Active: <b>{active}</b>  •  "
+        f"⏸ Inactive: <b>{len(ads) - active}</b>\n\n"
+        f"👇 Tap <b>replies</b> below to see all individual ads."
     )
-    header_msg = send_text(summary)
-    header_id = header_msg["message_id"]
-    print(f"✅ Posted header (message_id={header_id})")
+    header_msg = send_text(header_text)
+    header_id  = header_msg["message_id"]
+    print(f"✅ Header posted  (id={header_id})")
     time.sleep(1)
 
-    # ---- Post each ad as a reply to the header ----
-    sent = 0
-    failed = 0
+    # ── 2. Reply each ad under the header ───────────────────────────────────
+    sent = failed = 0
     for i, ad in enumerate(ads, 1):
         lib_id = ad.get("library_id", "?")
         media_path, media_type = find_local_media(ad)
@@ -334,15 +301,13 @@ def main():
 
         time.sleep(3.0 if media_path else 2.0)
 
-    # ---- Save file_ids ----
+    # ── 3. Save & close ─────────────────────────────────────────────────────
     save_file_ids(file_ids)
-
-    # ---- Final reply under the header ----
     send_text(f"<b>✅ Done — {sent} ads posted, {failed} failed.</b>", reply_to=header_id)
 
     print(f"\n{'='*50}")
-    print(f"Done. {sent} ads sent to channel, {failed} failed.")
-    print(f"file_ids saved to {FILE_IDS_PATH}")
+    print(f"Done. {sent} sent, {failed} failed.")
+    print(f"file_ids → {FILE_IDS_PATH}")
 
 
 if __name__ == "__main__":
